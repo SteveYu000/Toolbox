@@ -1,11 +1,8 @@
 # Toolbox
-A repository for some interesting tools
-## include
-- [HardlinkRemover](https://github.com/SteveYu000/Toolbox/blob/main/HardlinkRemover/readme.md)
-   - A simple Windows command-line tool designed to find and delete all hard links associated with specified files.
- 
-# Toolbox
-这是一个存放一些有趣工具的仓库。
+[English](README_en-US.md)
+
+这是一个存放有趣小工具的仓库。
+
 ## 工具列表
-- [HardLinkRemover](https://github.com/SteveYu000/Toolbox/blob/main/HardlinkRemover/readme.md)
-   - 一个简单的 Windows 命令行工具，用于查找并删除指定文件的所有硬链接（Hard Links）。
+
+- [HardLinkRemover](HardlinkRemover/readme.md) — Windows 硬链接管理工具，提供命令行和原生 GUI，可列出硬链接并精确删除全部、某一个或多个指定路径。
