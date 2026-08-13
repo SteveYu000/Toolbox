@@ -179,38 +179,42 @@ void print_usage()
     {
         std::cout
             << "用法：\n"
-            << "  HardLinkRemover list <文件> [文件 ...]\n"
+            << "  HardLinkRemover list <文件或文件夹> [文件或文件夹 ...]\n"
             << "  HardLinkRemover delete [--yes] <硬链接路径> [硬链接路径 ...]\n"
-            << "  HardLinkRemover delete-all [--yes] <文件> [文件 ...]\n"
-            << "  HardLinkRemover select <文件> [文件 ...]\n"
-            << "  HardLinkRemover <文件> [文件 ...]   （等同于 'select'）\n\n"
+            << "  HardLinkRemover delete-all [--yes] <文件或文件夹> [文件或文件夹 ...]\n"
+            << "  HardLinkRemover select <文件或文件夹> [文件或文件夹 ...]\n"
+            << "  HardLinkRemover <文件或文件夹> [...]   （等同于 'select'）\n\n"
             << "命令：\n"
-            << "  list        显示每个文件的全部名称（硬链接）。\n"
+            << "  list        显示每个文件的全部名称；文件夹会递归扫描。\n"
             << "  delete      只删除明确指定的一个或多个硬链接路径。\n"
-            << "  delete-all  查找并删除每个指定文件的全部名称。\n"
-            << "  select      查找硬链接，再按 1,3-5 等编号选择。\n\n"
+            << "  delete-all  查找并删除指定文件或文件夹内文件的全部名称。\n"
+            << "  select      递归查找硬链接，再按 1,3-5 等编号选择。\n\n"
             << "选项：\n"
             << "  -y, --yes   跳过最终删除确认。\n"
             << "  -h, --help  显示此帮助。\n\n"
+            << "拖放：可把一个或多个文件、文件夹或两者一起拖到本程序上。\n"
+            << "      文件夹会递归扫描，但不会进入目录重解析点。\n\n"
             << "警告：如果选中某个文件的全部名称，其数据将被永久删除。\n";
         return;
     }
 
     std::cout
         << "Usage:\n"
-        << "  HardLinkRemover list <file> [file ...]\n"
+        << "  HardLinkRemover list <file-or-folder> [file-or-folder ...]\n"
         << "  HardLinkRemover delete [--yes] <link> [link ...]\n"
-        << "  HardLinkRemover delete-all [--yes] <file> [file ...]\n"
-        << "  HardLinkRemover select <file> [file ...]\n"
-        << "  HardLinkRemover <file> [file ...]   (same as 'select')\n\n"
+        << "  HardLinkRemover delete-all [--yes] <file-or-folder> [file-or-folder ...]\n"
+        << "  HardLinkRemover select <file-or-folder> [file-or-folder ...]\n"
+        << "  HardLinkRemover <file-or-folder> [...]   (same as 'select')\n\n"
         << "Commands:\n"
-        << "  list        Show every name (hard link) of each file.\n"
+        << "  list        Show every name of each file; scan folders recursively.\n"
         << "  delete      Delete exactly the supplied one or more link paths.\n"
-        << "  delete-all  Find and delete every name of each supplied file.\n"
-        << "  select      Find links, then choose indices such as 1,3-5.\n\n"
+        << "  delete-all  Find and delete every name under supplied files or folders.\n"
+        << "  select      Find links recursively, then choose indices such as 1,3-5.\n\n"
         << "Options:\n"
         << "  -y, --yes   Skip the final deletion confirmation.\n"
         << "  -h, --help  Show this help.\n\n"
+        << "Drag and drop one or more files, folders, or a mixture onto this program.\n"
+        << "Folders are scanned recursively without entering directory reparse points.\n\n"
         << "Warning: selecting every name of a file permanently deletes its data.\n";
 }
 
@@ -245,6 +249,155 @@ struct LinkGroup
 {
     std::vector<fs::path> links;
 };
+
+struct InputFile
+{
+    fs::path path;
+    bool explicitly_supplied = false;
+};
+
+struct ExpandedInputs
+{
+    std::vector<InputFile> files;
+    std::size_t errors = 0;
+    std::size_t directory_count = 0;
+    std::size_t scanned_file_count = 0;
+    std::size_t skipped_count = 0;
+};
+
+void append_input_file(
+    std::vector<InputFile> &files,
+    const fs::path &candidate,
+    const bool explicitly_supplied)
+{
+    const auto existing = std::find_if(
+        files.begin(),
+        files.end(),
+        [&candidate](const InputFile &file)
+        {
+            return paths_equal(file.path, candidate);
+        });
+    if (existing != files.end())
+    {
+        existing->explicitly_supplied =
+            existing->explicitly_supplied || explicitly_supplied;
+        return;
+    }
+
+    files.push_back({candidate, explicitly_supplied});
+}
+
+ExpandedInputs expand_inputs(const std::vector<fs::path> &inputs)
+{
+    ExpandedInputs expanded;
+    for (const fs::path &input : inputs)
+    {
+        const DWORD attributes = GetFileAttributesW(input.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        {
+            std::cerr << localized("[error] Unable to access path: ", "[错误] 无法访问路径：")
+                      << display_path(input) << '\n';
+            ++expanded.errors;
+            continue;
+        }
+        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        {
+            append_input_file(expanded.files, input, true);
+            continue;
+        }
+        if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+        {
+            std::cerr << localized(
+                             "[error] Directory reparse points are not scanned: ",
+                             "[错误] 不扫描目录重解析点：")
+                      << display_path(input) << '\n';
+            ++expanded.errors;
+            continue;
+        }
+
+        ++expanded.directory_count;
+        std::error_code traversal_error;
+        fs::recursive_directory_iterator iterator(
+            input,
+            fs::directory_options::skip_permission_denied,
+            traversal_error);
+        const fs::recursive_directory_iterator end;
+        if (traversal_error)
+        {
+            std::cerr << localized("[error] Unable to scan folder: ", "[错误] 无法扫描文件夹：")
+                      << display_path(input) << '\n';
+            ++expanded.errors;
+            continue;
+        }
+
+        while (iterator != end)
+        {
+            const fs::path entry_path = iterator->path();
+            const DWORD entry_attributes = GetFileAttributesW(entry_path.c_str());
+            if (entry_attributes == INVALID_FILE_ATTRIBUTES)
+            {
+                ++expanded.skipped_count;
+            }
+            else if ((entry_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            {
+                // 不进入 junction、目录符号链接等重解析点，保证扫描范围不越界。
+                if ((entry_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                {
+                    iterator.disable_recursion_pending();
+                    ++expanded.skipped_count;
+                }
+            }
+            else if ((entry_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            {
+                ++expanded.skipped_count;
+            }
+            else
+            {
+                ++expanded.scanned_file_count;
+                append_input_file(expanded.files, entry_path, false);
+            }
+
+            iterator.increment(traversal_error);
+            if (traversal_error)
+            {
+                ++expanded.skipped_count;
+                traversal_error.clear();
+            }
+        }
+    }
+    return expanded;
+}
+
+void print_scan_summary(const ExpandedInputs &expanded)
+{
+    if (expanded.directory_count == 0U)
+    {
+        return;
+    }
+
+    if (uses_chinese())
+    {
+        std::cout << "已递归扫描 " << expanded.directory_count << " 个文件夹输入，共检查 "
+                  << expanded.scanned_file_count << " 个文件";
+        if (expanded.skipped_count != 0U)
+        {
+            std::cout << "，跳过 " << expanded.skipped_count << " 个不可访问或重解析项目";
+        }
+        std::cout << "。\n";
+    }
+    else
+    {
+        std::cout << "Recursively scanned " << expanded.directory_count
+                  << " folder input(s) and inspected " << expanded.scanned_file_count
+                  << " file(s)";
+        if (expanded.skipped_count != 0U)
+        {
+            std::cout << "; skipped " << expanded.skipped_count
+                      << " inaccessible or reparse item(s)";
+        }
+        std::cout << ".\n";
+    }
+}
 
 bool groups_overlap(const LinkGroup &left, const LinkGroup &right)
 {
@@ -331,19 +484,36 @@ struct QueryCollection
 };
 
 QueryCollection collect_links(
-    const std::vector<fs::path> &files,
+    const std::vector<InputFile> &files,
     const bool report_single_link_files)
 {
     QueryCollection collection;
-    for (const fs::path &file : files)
+    for (const InputFile &file : files)
     {
-        LinkQueryResult query = hardlink_remover::find_hard_links(file);
+        LinkQueryResult query = hardlink_remover::find_hard_links(file.path);
 
         if (!query.succeeded())
         {
             print_query_error(query);
             ++collection.errors;
             continue;
+        }
+
+        const bool has_multiple_links = query.links.size() >= 2U;
+        if (!has_multiple_links)
+        {
+            ++collection.single_link_files;
+            if (report_single_link_files && file.explicitly_supplied)
+            {
+                std::cout << localized("No multiple hard links: ", "没有多个硬链接：")
+                          << display_path(query.requested_path) << '\n';
+            }
+
+            // 文件夹扫描只展示真正的硬链接组，避免为大量普通文件逐项输出。
+            if (!file.explicitly_supplied)
+            {
+                continue;
+            }
         }
 
         LinkGroup candidate{std::move(query.links)};
@@ -359,17 +529,10 @@ QueryCollection collect_links(
             continue;
         }
 
-        const bool has_multiple_links = candidate.links.size() >= 2U;
         collection.groups.push_back(std::move(candidate));
         const LinkGroup &added_group = collection.groups.back();
         if (!has_multiple_links)
         {
-            ++collection.single_link_files;
-            if (report_single_link_files)
-            {
-                std::cout << localized("No multiple hard links: ", "没有多个硬链接：")
-                          << display_path(query.requested_path) << '\n';
-            }
             continue;
         }
 
@@ -378,6 +541,18 @@ QueryCollection collect_links(
             append_unique(collection.links, link);
         }
     }
+    return collection;
+}
+
+QueryCollection collect_input_links(
+    const std::vector<fs::path> &inputs,
+    const bool report_single_link_files)
+{
+    const ExpandedInputs expanded = expand_inputs(inputs);
+    print_scan_summary(expanded);
+
+    QueryCollection collection = collect_links(expanded.files, report_single_link_files);
+    collection.errors += expanded.errors;
     return collection;
 }
 
@@ -569,7 +744,7 @@ std::optional<std::vector<std::size_t>> parse_selection(
 
 int select_and_delete(const std::vector<fs::path> &files, const bool assume_yes)
 {
-    const QueryCollection collection = collect_links(files, true);
+    const QueryCollection collection = collect_input_links(files, true);
     if (collection.links.empty())
     {
         std::cout << localized(
@@ -714,8 +889,8 @@ int wmain(const int argc, wchar_t *argv[])
     if (paths.empty())
     {
         std::cerr << localized(
-            "At least one file path is required.\n\n",
-            "至少需要一个文件路径。\n\n");
+            "At least one file or folder path is required.\n\n",
+            "至少需要一个文件或文件夹路径。\n\n");
         print_usage();
         return 1;
     }
@@ -731,7 +906,7 @@ int wmain(const int argc, wchar_t *argv[])
     {
     case Command::list:
     {
-        const QueryCollection collection = collect_links(paths, false);
+        const QueryCollection collection = collect_input_links(paths, false);
         print_link_groups(collection.groups, false, false);
         return collection.errors == 0U ? 0 : 2;
     }
@@ -739,7 +914,7 @@ int wmain(const int argc, wchar_t *argv[])
         return delete_paths(paths, assume_yes);
     case Command::delete_all:
     {
-        const QueryCollection collection = collect_links(paths, true);
+        const QueryCollection collection = collect_input_links(paths, true);
         const int deletion_result = delete_paths(collection.links, assume_yes);
         if (deletion_result != 0)
         {

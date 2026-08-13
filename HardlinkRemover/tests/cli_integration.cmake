@@ -17,6 +17,11 @@ set(second_link "${TEST_ROOT}/second-link.txt")
 set(other_source "${TEST_ROOT}/other-source.txt")
 set(other_link "${TEST_ROOT}/other-link.txt")
 set(selection_input "${TEST_ROOT}/selection.txt")
+set(dragged_folder "${TEST_ROOT}/dragged folder")
+set(nested_folder "${dragged_folder}/nested")
+set(nested_source "${nested_folder}/nested-source.txt")
+set(nested_link "${nested_folder}/nested-link.txt")
+set(ordinary_file "${dragged_folder}/ordinary.txt")
 
 execute_process(
     COMMAND "${CLI_EXECUTABLE}" --help
@@ -49,6 +54,14 @@ if(NOT other_link_result STREQUAL "0")
     fail_test("无法创建另一组测试硬链接：${other_link_result}")
 endif()
 
+file(MAKE_DIRECTORY "${nested_folder}")
+file(WRITE "${nested_source}" "HardLinkRemover dragged-folder group")
+file(CREATE_LINK "${nested_source}" "${nested_link}" RESULT nested_link_result)
+if(NOT nested_link_result STREQUAL "0")
+    fail_test("无法创建文件夹拖入测试硬链接：${nested_link_result}")
+endif()
+file(WRITE "${ordinary_file}" "ordinary file without multiple hard links")
+
 execute_process(
     COMMAND "${CLI_EXECUTABLE}" list "${source_file}" "${first_link}" "${other_source}"
     RESULT_VARIABLE list_result
@@ -70,6 +83,23 @@ if(NOT group_marker_count EQUAL 2)
     fail_test("list 子命令没有用两个独立标识显示两组硬链接，或没有去除重复组。")
 endif()
 
+execute_process(
+    COMMAND "${CLI_EXECUTABLE}" list "${dragged_folder}"
+    RESULT_VARIABLE folder_list_result
+    OUTPUT_VARIABLE folder_list_output
+    ERROR_VARIABLE folder_list_error
+)
+if(NOT folder_list_result EQUAL 0)
+    fail_test("list 子命令无法递归处理拖入的文件夹：${folder_list_error}")
+endif()
+string(FIND "${folder_list_output}" "nested-source.txt" nested_source_position)
+string(FIND "${folder_list_output}" "nested-link.txt" nested_link_position)
+string(REGEX MATCHALL "(硬链接组|Hard-link group) #[0-9]+" folder_group_markers "${folder_list_output}")
+list(LENGTH folder_group_markers folder_group_count)
+if(nested_source_position EQUAL -1 OR nested_link_position EQUAL -1 OR NOT folder_group_count EQUAL 1)
+    fail_test("拖入文件夹后未递归找到子目录中的硬链接组。")
+endif()
+
 file(WRITE "${selection_input}" "q\n")
 execute_process(
     COMMAND "${CLI_EXECUTABLE}" select "${source_file}" "${other_source}"
@@ -86,6 +116,25 @@ list(LENGTH select_group_markers select_group_count)
 string(FIND "${select_output}" "[5]" fifth_path_position)
 if(NOT select_group_count EQUAL 2 OR fifth_path_position EQUAL -1)
     fail_test("select 子命令没有分组显示路径，或跨组编号不连续。")
+endif()
+
+# 省略子命令等同于从 Explorer 把文件和文件夹混合拖到 CLI 可执行文件上。
+execute_process(
+    COMMAND "${CLI_EXECUTABLE}" "${source_file}" "${dragged_folder}"
+    INPUT_FILE "${selection_input}"
+    RESULT_VARIABLE drag_result
+    OUTPUT_VARIABLE drag_output
+    ERROR_VARIABLE drag_error
+)
+if(NOT drag_result EQUAL 0)
+    fail_test("文件与文件夹混合拖入模式失败：${drag_error}")
+endif()
+string(FIND "${drag_output}" "first-link.txt" dragged_file_position)
+string(FIND "${drag_output}" "nested-link.txt" dragged_folder_position)
+string(REGEX MATCHALL "(硬链接组|Hard-link group) #[0-9]+" drag_group_markers "${drag_output}")
+list(LENGTH drag_group_markers drag_group_count)
+if(dragged_file_position EQUAL -1 OR dragged_folder_position EQUAL -1 OR NOT drag_group_count EQUAL 2)
+    fail_test("文件与文件夹混合拖入后没有显示两组硬链接。")
 endif()
 
 execute_process(
